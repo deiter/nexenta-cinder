@@ -21,6 +21,8 @@ from mock import patch
 from oslo_utils import units
 import uuid
 
+from six.moves import urllib
+
 from cinder import context
 from cinder import db
 from cinder import exception
@@ -39,7 +41,9 @@ class TestNexentaISCSIDriver(test.TestCase):
         'name': TEST_VOLUME_NAME,
         'size': 1,
         'id': '1',
-        'status': 'available'
+        'status': 'available',
+        'volume_attachment': [{
+            'connector': {'initiator': 'iqn:test', 'multipath': True}}]
     }
     TEST_VOLUME_REF2 = {
         'name': TEST_VOLUME_NAME2,
@@ -83,7 +87,9 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_dataset_compression = 'on'
         self.cfg.nexenta_dataset_dedup = 'off'
         self.cfg.reserved_percentage = 20
+        self.cfg.nexenta_host_group_prefix = 'hg'
         self.cfg.nexenta_volume = 'pool'
+        self.cfg.driver_ssl_cert_verify = False
         self.cfg.nexenta_luns_per_target = 20
         self.cfg.driver_ssl_cert_verify = False
         self.cfg.nexenta_iscsi_target_portals = ''
@@ -110,7 +116,7 @@ class TestNexentaISCSIDriver(test.TestCase):
 
     def test_do_setup(self):
         self.nef_mock.post.side_effect = exception.NexentaException(
-            'Could not create volume group')
+            '{"msg": "Could not create volume group", "code": "ENOENT"}')
         self.assertRaises(
             exception.NexentaException,
             self.drv.do_setup, self.ctxt)
@@ -120,21 +126,13 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.assertIsNone(self.drv.do_setup(self.ctxt))
 
     def test_check_for_setup_error(self):
-        def get_side_effect1(*args, **kwargs):
-            if 'storage/pools' in args[0]:
-                return {}
-            elif 'storage/volumeGroups' in args[0]:
-                raise exception.NexentaException
-
-        def get_side_effect2(*args, **kwargs):
+        def get_side_effect(*args, **kwargs):
             if ('storage/pools' or 'storage/volumeGroups') in args[0]:
                 return {}
             else:
                 return {'data': [{'name': 'iscsit', 'state': 'offline'}]}
 
-        self.nef_mock.get.side_effect = get_side_effect1
-        self.assertRaises(LookupError, self.drv.check_for_setup_error)
-        self.nef_mock.get.side_effect = get_side_effect2
+        self.nef_mock.get.side_effect = get_side_effect
         self.assertRaises(
             exception.NexentaException, self.drv.check_for_setup_error)
 
@@ -160,15 +158,16 @@ class TestNexentaISCSIDriver(test.TestCase):
 
     def test_delete_snapshot(self):
         self._create_volume_db_entry()
-        url = ('storage/snapshots/pool%2Fvg%2Fvolume-1@snapshot1')
-
-        self.nef_mock.delete.side_effect = exception.NexentaException(
-            'Failed to destroy snapshot')
+        self.nef_mock.get.return_value = {'data': ['volume']}
+        path = '%s/%s@%s' % (
+            self.drv.dataset, self.TEST_VOLUME_NAME,
+            self.TEST_SNAPSHOT_NAME)
+        params = {'recursive': False, 'defer': True}
+        url = 'storage/snapshots/%s?%s' % (
+            urllib.parse.quote_plus(path),
+            urllib.parse.urlencode(params))
         self.drv.delete_snapshot(self.TEST_SNAPSHOT_REF)
         self.nef_mock.delete.assert_called_with(url)
-
-        self.nef_mock.delete.side_effect = exception.NexentaException('Error')
-        self.assertIsNone(self.drv.delete_snapshot(self.TEST_SNAPSHOT_REF))
 
     @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
            'NexentaISCSIDriver.create_snapshot')
@@ -191,7 +190,9 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.drv.create_snapshot(self.TEST_SNAPSHOT_REF)
         url = 'storage/snapshots'
         self.nef_mock.post.assert_called_with(
-            url, {'path': 'pool/vg/volume-1@snapshot1'})
+            url, {'path': '%s/%s@%s' % (
+                self.drv.dataset, self.TEST_VOLUME_NAME,
+                self.TEST_SNAPSHOT_NAME)})
 
     def test_create_larger_volume_from_snapshot(self):
         self._create_volume_db_entry()
@@ -208,8 +209,20 @@ class TestNexentaISCSIDriver(test.TestCase):
     def fake_uuid4():
         yield uuid.UUID('38d18a48-b791-4046-b523-a84aad966310')
 
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._create_target_group')
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._create_target')
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._target_group_props')
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._get_host_portals')
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._get_host_group')
     @patch('uuid.uuid4', fake_uuid4().next)
-    def test_do_export(self):
+    def test_initialize_connection(
+            self, get_hg, get_hp, tg_props, create_t, create_tg):
+        get_hp.return_value = ['portal1', 'portal2']
         target_name = 'iqn:cinder-%s' % '38d18a48b7914046b523a84aad966310'
         lun = 0
 
@@ -239,20 +252,31 @@ class TestNexentaISCSIDriver(test.TestCase):
 
         self.nef_mock.get.side_effect = GetSideEffect()
         self.nef_mock.post.side_effect = post_side_effect
-        res = self.drv._do_export(self.ctxt, self.TEST_VOLUME_REF)
-        provider_location = '%(host)s:%(port)s %(name)s %(lun)s' % {
-            'host': self.cfg.nexenta_host,
-            'port': self.cfg.nexenta_iscsi_target_portal_port,
-            'name': target_name,
-            'lun': lun,
-        }
-        expected = {'provider_location': provider_location}
+        res = self.drv.initialize_connection(
+            self.TEST_VOLUME_REF, {'initiator': 'iqn:test', 'multipath': True})
+        expected = {'data': {
+            'access_mode': 'rw',
+            'encrypted': False,
+            'qos_specs': None,
+            'target_discovered': False,
+            'target_iqns': ['iqn:cinder-38d18a48b7914046b523a84aad966310',
+                            'iqn:cinder-38d18a48b7914046b523a84aad966310'],
+            'target_luns': [0, 0],
+            'target_portals': ['portal1', 'portal2'],
+            'volume_id': '1'}, 'driver_volume_type': 'iscsi'}
         self.assertEqual(expected, res)
 
-    def test_remove_export(self):
+    @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
+           'NexentaISCSIDriver._get_host_group')
+    def test_terminate_connection(self, get_hg):
         mapping_id = '1234567890'
         self.nef_mock.get.return_value = {'data': [{'id': mapping_id}]}
-        self.drv.remove_export(self.ctxt, self.TEST_VOLUME_REF)
+        # self.drv.remove_export(self.ctxt, self.TEST_VOLUME_REF)
+        retval = {'driver_volume_type': 'iscsi', 'data': {}}
+        self.assertEqual(
+            retval, self.drv.terminate_connection(
+                self.TEST_VOLUME_REF,
+                {}))
         url = 'san/lunMappings/%s' % mapping_id
         self.nef_mock.delete.assert_called_with(url)
 
@@ -271,6 +295,8 @@ class TestNexentaISCSIDriver(test.TestCase):
             'vendor_name': 'Nexenta',
             'dedup': self.cfg.nexenta_dataset_dedup,
             'compression': self.cfg.nexenta_dataset_compression,
+            'consistencygroup_support': True,
+            'consistent_group_snapshot_enabled': True,
             'description': self.cfg.nexenta_dataset_description,
             'driver_version': self.drv.VERSION,
             'storage_protocol': 'iSCSI',
@@ -281,6 +307,7 @@ class TestNexentaISCSIDriver(test.TestCase):
             'QoS_support': False,
             'volume_backend_name': self.drv.backend_name,
             'location_info': location_info,
+            'multiattach': True,
             'iscsi_target_portal_port': (
                 self.cfg.nexenta_iscsi_target_portal_port),
             'nef_url': self.drv.nef.url
