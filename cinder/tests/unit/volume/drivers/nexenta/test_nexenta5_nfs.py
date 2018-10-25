@@ -16,7 +16,9 @@
 Unit tests for OpenStack Cinder volume driver
 """
 
-from mock import call, Mock, patch
+from mock import call
+from mock import Mock
+from mock import patch
 from six.moves import urllib
 
 from cinder import context

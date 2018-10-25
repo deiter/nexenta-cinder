@@ -183,7 +183,8 @@ class TestNexentaJSONProxy(test.TestCase):
             'http', HOST, 8080, rnd_url), adapter)
         self.assertRaises(exception.NexentaException, self.nef.get, rnd_url)
 
-    def test_get__not_nef_error(self):
+    @patch('cinder.volume.drivers.nexenta.utils.ex2err')
+    def test_get__not_nef_error(self, ex2err):
         class TestAdapter(adapters.HTTPAdapter):
 
             def __init__(self):
@@ -195,14 +196,16 @@ class TestNexentaJSONProxy(test.TestCase):
                 r.request = request
                 return r
 
+        ex2err.return_value = {'code': 404}
         adapter = TestAdapter()
         rnd_url = 'some/random/url'
         self.nef.session.mount('{}://{}:{}/{}'.format(
             'http', HOST, 8080, rnd_url), adapter)
-        self.assertRaises(exception.VolumeBackendAPIException, self.nef.get,
+        self.assertRaises(exception.NexentaException, self.nef.get,
                           rnd_url)
 
-    def test_get__not_nef_error_empty_body(self):
+    @patch('cinder.volume.drivers.nexenta.utils.ex2err')
+    def test_get__not_nef_error_empty_body(self, ex2err):
         class TestAdapter(adapters.HTTPAdapter):
 
             def __init__(self):
@@ -213,11 +216,12 @@ class TestNexentaJSONProxy(test.TestCase):
                 r.request = request
                 return r
 
+        ex2err.return_value = {'code': 'EEXIST'}
         adapter = TestAdapter()
         rnd_url = 'some/random/url'
         self.nef.session.mount('{}://{}:{}/{}'.format(
             'http', HOST, 8080, rnd_url), adapter)
-        self.assertRaises(exception.VolumeBackendAPIException, self.nef.get,
+        self.assertRaises(exception.NexentaException, self.nef.get,
                           rnd_url)
 
     def test_202(self):
