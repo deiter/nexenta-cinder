@@ -33,10 +33,10 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 
 
 class TestNexentaISCSIDriver(test.TestCase):
-    TEST_VOLUME_NAME = 'volume1'
-    TEST_VOLUME_NAME2 = 'volume2'
-    TEST_VOLUME_NAME3 = 'volume3'
-    TEST_SNAPSHOT_NAME = 'snapshot1'
+    TEST_VOLUME_NAME = 'volume-1'
+    TEST_VOLUME_NAME2 = 'volume-2'
+    TEST_VOLUME_NAME3 = 'volume-3'
+    TEST_SNAPSHOT_NAME = 'snapshot-1'
     TEST_VOLUME_REF = {
         'name': TEST_VOLUME_NAME,
         'size': 1,
@@ -116,13 +116,13 @@ class TestNexentaISCSIDriver(test.TestCase):
 
     def test_do_setup(self):
         self.nef_mock.post.side_effect = exception.NexentaException(
-            '{"msg": "Could not create volume group", "code": "ENOENT"}')
+            {"msg": "Could not create volume group", "code": "ENOENT"})
         self.assertRaises(
             exception.NexentaException,
             self.drv.do_setup, self.ctxt)
 
         self.nef_mock.post.side_effect = exception.NexentaException(
-            '{"code": "EEXIST"}')
+            {"code": "EEXIST"})
         self.assertIsNone(self.drv.do_setup(self.ctxt))
 
     def test_check_for_setup_error(self):
@@ -139,8 +139,9 @@ class TestNexentaISCSIDriver(test.TestCase):
     def test_create_volume(self):
         self.drv.create_volume(self.TEST_VOLUME_REF)
         url = 'storage/volumes'
+        path = '%s/%s' % (self.drv.dataset, self.TEST_VOLUME_NAME)
         self.nef_mock.post.assert_called_with(url, {
-            'path': 'pool/vg/volume1',
+            'path': path,
             'volumeSize': 1 * units.Gi,
             'volumeBlockSize': 32768,
             'sparseVolume': self.cfg.nexenta_sparse})
@@ -152,7 +153,8 @@ class TestNexentaISCSIDriver(test.TestCase):
 
     def test_extend_volume(self):
         self.drv.extend_volume(self.TEST_VOLUME_REF, 2)
-        url = 'storage/volumes/pool%2Fvg%2Fvolume1'
+        path = '%s/%s' % (self.drv.dataset, self.TEST_VOLUME_NAME)
+        url = 'storage/volumes/%s' % urllib.parse.quote_plus(path)
         self.nef_mock.put.assert_called_with(url, {
             'volumeSize': 2 * units.Gi})
 
@@ -179,8 +181,8 @@ class TestNexentaISCSIDriver(test.TestCase):
         self._create_volume_db_entry()
         vol = self.TEST_VOLUME_REF2
         src_vref = self.TEST_VOLUME_REF
-        crt_vol.side_effect = exception.NexentaException()
-        dlt_snap.side_effect = exception.NexentaException()
+        crt_vol.side_effect = exception.NexentaException(reason='error')
+        dlt_snap.side_effect = exception.NexentaException(reason='err2')
         self.assertRaises(
             exception.NexentaException,
             self.drv.create_cloned_volume, vol, src_vref)
@@ -201,13 +203,14 @@ class TestNexentaISCSIDriver(test.TestCase):
 
         self.drv.create_volume_from_snapshot(vol, src_vref)
 
+        path = '%s/%s' % (self.drv.dataset, self.TEST_VOLUME_NAME3)
         # make sure the volume get extended!
-        url = 'storage/volumes/pool%2Fvg%2Fvolume3'
+        url = 'storage/volumes/%s' % urllib.parse.quote_plus(path)
         self.nef_mock.put.assert_called_with(url, {
             'volumeSize': 2 * units.Gi})
 
     def fake_uuid4():
-        yield uuid.UUID('38d18a48-b791-4046-b523-a84aad966310')
+        return uuid.UUID('38d18a48-b791-4046-b523-a84aad966310')
 
     @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
            'NexentaISCSIDriver._create_target_group')
@@ -219,7 +222,7 @@ class TestNexentaISCSIDriver(test.TestCase):
            'NexentaISCSIDriver._get_host_portals')
     @patch('cinder.volume.drivers.nexenta.ns5.iscsi.'
            'NexentaISCSIDriver._get_host_group')
-    @patch('uuid.uuid4', fake_uuid4().next)
+    @patch('uuid.uuid4', fake_uuid4)
     def test_initialize_connection(
             self, get_hg, get_hp, tg_props, create_t, create_tg):
         get_hp.return_value = ['portal1', 'portal2']
@@ -271,7 +274,6 @@ class TestNexentaISCSIDriver(test.TestCase):
     def test_terminate_connection(self, get_hg):
         mapping_id = '1234567890'
         self.nef_mock.get.return_value = {'data': [{'id': mapping_id}]}
-        # self.drv.remove_export(self.ctxt, self.TEST_VOLUME_REF)
         retval = {'driver_volume_type': 'iscsi', 'data': {}}
         self.assertEqual(
             retval, self.drv.terminate_connection(

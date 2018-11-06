@@ -36,9 +36,9 @@ class TestNexentaNfsDriver(test.TestCase):
     TEST_SHARE2_OPTIONS = '-o intr'
     TEST_FILE_NAME = 'test.txt'
     TEST_SHARES_CONFIG_FILE = '/etc/cinder/nexenta-shares.conf'
-    TEST_SNAPSHOT_NAME = 'snapshot1'
-    TEST_VOLUME_NAME = 'volume1'
-    TEST_VOLUME_NAME2 = 'volume2'
+    TEST_SNAPSHOT_NAME = 'snapshot-1'
+    TEST_VOLUME_NAME = 'volume-1'
+    TEST_VOLUME_NAME2 = 'volume-2'
 
     TEST_VOLUME = fake_volume_obj(None, **{
         'name': TEST_VOLUME_NAME,
@@ -177,15 +177,16 @@ class TestNexentaNfsDriver(test.TestCase):
         self.drv.delete_volume(self.TEST_VOLUME)
         path = '/'.join(['pool/share', self.TEST_VOLUME['name']])
         self.nef_mock.delete.assert_called_with(
-            'storage/filesystems/%s?force=true&snapshots=true' % (
-                urllib.parse.quote_plus(path)))
+            'storage/filesystems/%s?%s' % (
+                urllib.parse.quote_plus(path),
+                urllib.parse.urlencode({'snapshots': True, 'force': True})))
 
     def test_create_snapshot(self):
         self._create_volume_db_entry()
         self.drv.create_snapshot(self.TEST_SNAPSHOT)
         vol_path = '/'.join(['pool/share', self.TEST_VOLUME['name']])
         url = 'storage/snapshots'
-        data = {'path': '%s@snapshot1' % vol_path}
+        data = {'path': '%s@snapshot-1' % vol_path}
         self.nef_mock.post.assert_called_with(url, data)
 
     def test_delete_snapshot(self):
@@ -194,8 +195,9 @@ class TestNexentaNfsDriver(test.TestCase):
         self.drv.delete_snapshot(self.TEST_SNAPSHOT)
 
         vol_path = '/'.join(['pool/share', self.TEST_VOLUME['name']])
-        snap_path = urllib.parse.quote_plus(('%s@snapshot1' % vol_path))
-        url = 'storage/snapshots/%s?defer=true' % snap_path
+        snap_path = urllib.parse.quote_plus(('%s@snapshot-1' % vol_path))
+        params = urllib.parse.urlencode({'recursive': False, 'defer': True})
+        url = 'storage/snapshots/%s?%s' % (snap_path, params)
         self.nef_mock.delete.assert_called_with(url)
 
     @patch('cinder.volume.drivers.nexenta.ns5.nfs.'
@@ -211,7 +213,7 @@ class TestNexentaNfsDriver(test.TestCase):
         self.drv.create_volume_from_snapshot(
             self.TEST_VOLUME2, self.TEST_SNAPSHOT)
         source_vol_path = '/'.join(['pool/share', self.TEST_VOLUME['name']])
-        snap_path = '%s@snapshot1' % urllib.parse.quote_plus(source_vol_path)
+        snap_path = '%s@snapshot-1' % urllib.parse.quote_plus(source_vol_path)
         url_1 = 'storage/snapshots/%s/clone' % snap_path
         url_2 = 'storage/filesystems/%s/unmount' % urllib.parse.quote_plus(
             path)
