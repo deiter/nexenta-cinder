@@ -176,10 +176,10 @@ class TestNexentaNfsDriver(test.TestCase):
         self.nef_mock.get.return_value = {'data': ['volume']}
         self.drv.delete_volume(self.TEST_VOLUME)
         path = '/'.join(['pool/share', self.TEST_VOLUME['name']])
-        self.nef_mock.delete.assert_called_with(
-            'storage/filesystems/%s?%s' % (
-                urllib.parse.quote_plus(path),
-                urllib.parse.urlencode({'snapshots': True, 'force': True})))
+        url = 'storage/filesystems/%s?%s' % (
+            urllib.parse.quote_plus(path),
+            urllib.parse.urlencode({'force': True, 'snapshots': True}))
+        self.nef_mock.delete.assert_called_with(url)
 
     def test_create_snapshot(self):
         self._create_volume_db_entry()
