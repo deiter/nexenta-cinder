@@ -40,16 +40,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
     """Executes volume driver commands on Nexenta Appliance.
 
     Version history:
+
+    .. code-block:: none
+
         1.0.0 - Initial driver version.
         1.1.0 - Support for extend volume.
         1.2.0 - Added HTTPS support.
-                Added use of sessions for REST calls.
-                Added abandoned volumes and snapshots cleanup.
+              - Added use of sessions for REST calls.
+              - Added abandoned volumes and snapshots cleanup.
         1.3.0 - Failover support.
         1.4.0 - Migrate volume support and new NEF API calls.
         1.5.0 - Revert to snapshot support.
         1.6.0 - Get mountPoint from API to support old style mount points.
-                Mount and umount shares on each operation to avoid mass
+              - Mount and umount shares on each operation to avoid mass
                 mounts on controller. Clean up mount folders on delete.
         1.6.1 - Fixed volume from image creation.
         1.6.2 - Removed redundant share mount from initialize_connection.
