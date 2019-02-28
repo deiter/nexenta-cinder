@@ -17,11 +17,11 @@ import errno
 import hashlib
 import os
 import posixpath
-import six
 import uuid
 
 from oslo_log import log as logging
 from oslo_utils import units
+import six
 
 from cinder import context
 from cinder import coordination
@@ -29,8 +29,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder import objects
 from cinder.privsep import fs
-from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefException
-from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
+from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers import nfs
 from cinder.volume import utils
@@ -80,9 +79,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Added coordination for dataset operations.
         1.8.1 - Support for NexentaStor tenants.
         1.8.2 - Added manage/unmanage/manageable-list volume/snapshot support.
+        1.8.3 - Added consistency group capability to generic volume group.
     """
 
-    VERSION = '1.8.2'
+    VERSION = '1.8.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -97,7 +97,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                          'backend configuration not found')
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
-            raise NefException(code='ENODATA', message=message)
+            raise jsonrpc.NefException(code='ENODATA', message=message)
         self.configuration.append_config_values(
             options.NEXENTA_CONNECTION_OPTS)
         self.configuration.append_config_values(
@@ -123,9 +123,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.configuration.nexenta_origin_snapshot_template)
 
     def do_setup(self, context):
-        self.nef = NefProxy(self.driver_volume_type,
-                            self.root_path,
-                            self.configuration)
+        self.nef = jsonrpc.NefProxy(self.driver_volume_type,
+                                    self.root_path,
+                                    self.configuration)
 
     def check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
@@ -133,11 +133,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if filesystem['mountPoint'] == 'none':
             message = (_('NFS root filesystem %(path)s is not writable')
                        % {'path': filesystem['mountPoint']})
-            raise NefException(code='ENOENT', message=message)
+            raise jsonrpc.NefException(code='ENOENT', message=message)
         if not filesystem['isMounted']:
             message = (_('NFS root filesystem %(path)s is not mounted')
                        % {'path': filesystem['mountPoint']})
-            raise NefException(code='ENOTDIR', message=message)
+            raise jsonrpc.NefException(code='ENOTDIR', message=message)
         if filesystem['nonBlockingMandatoryMode']:
             payload = {'nonBlockingMandatoryMode': False}
             self.nef.filesystems.set(self.root_path, payload)
@@ -145,13 +145,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if service['state'] != 'online':
             message = (_('NFS server service is not online: %(state)s')
                        % {'state': service['state']})
-            raise NefException(code='ESRCH', message=message)
+            raise jsonrpc.NefException(code='ESRCH', message=message)
         share = self.nef.nfs.get(self.root_path)
         if share['shareState'] != 'online':
             message = (_('NFS share %(share)s is not online: %(state)s')
                        % {'share': self.root_path,
                           'state': share['shareState']})
-            raise NefException(code='ESRCH', message=message)
+            raise jsonrpc.NefException(code='ESRCH', message=message)
 
     def create_volume(self, volume):
         """Creates a volume.
@@ -172,11 +172,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if self.compressed_volumes != 'off':
                 payload = {'compressionMode': self.compressed_volumes}
                 self.nef.filesystems.set(volume_path, payload)
-        except NefException as create_error:
+        except jsonrpc.NefException as create_error:
             try:
                 payload = {'force': True}
                 self.nef.filesystems.delete(volume_path, payload)
-            except NefException as delete_error:
+            except jsonrpc.NefException as delete_error:
                 LOG.debug('Failed to delete volume %(path)s: %(error)s',
                           {'path': volume_path, 'error': delete_error})
             raise create_error
@@ -221,7 +221,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     LOG.error('Failed to unmount NFS share %(share)s '
                               'after %(attempts)s attempts',
                               {'share': share, 'attempts': attempts})
-                    raise error
+                    raise
                 LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
                           'retrying unmount %(share)s from %(path)s',
                           {'attempt': attempt, 'error': error,
@@ -242,6 +242,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.filesystems.mount(volume_path)
         share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
         self._ensure_share_mounted(share)
+
+    def _remount_volume(self, volume):
+        """Workaround for NEX-16457."""
+        volume_path = self._get_volume_path(volume)
+        self.nef.filesystems.unmount(volume_path)
+        self.nef.filesystems.mount(volume_path)
 
     def _unmount_volume(self, volume):
         """Ensure that volume is unmounted on the host."""
@@ -329,7 +335,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self.nef.hpr.create(payload)
                 break
-            except NefException as error:
+            except jsonrpc.NefException as error:
                 if nef_ip is None or error.code not in ('EINVAL', 'ENOENT'):
                     LOG.error('Failed to create replication '
                               'service %(payload)s: %(error)s',
@@ -338,14 +344,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         try:
             self.nef.hpr.start(svc)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             LOG.error('Failed to start replication '
                       'service %(svc)s: %(error)s',
                       {'svc': svc, 'error': error})
             try:
                 payload = {'force': True}
                 self.nef.hpr.delete(svc, payload)
-            except NefException as error:
+            except jsonrpc.NefException as error:
                 LOG.error('Failed to delete replication '
                           'service %(svc)s: %(error)s',
                           {'svc': svc, 'error': error})
@@ -370,7 +376,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         try:
             self.delete_volume(volume)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             LOG.debug('Failed to delete source volume %(volume)s: %(error)s',
                       {'volume': volume['name'], 'error': error})
         return True, None
@@ -420,9 +426,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         delete_payload = {'force': True, 'snapshots': True}
         try:
             self.nef.filesystems.delete(volume_path, delete_payload)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             if error.code != 'EEXIST':
-                raise error
+                raise
             snapshots_tree = {}
             snapshots_payload = {'parent': volume_path, 'fields': 'path'}
             snapshots = self.nef.snapshots.list(snapshots_payload)
@@ -457,10 +463,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._mount_volume(volume)
         volume_file = self.local_path(volume)
         if self.sparsed_volumes:
-            self._execute('truncate', '-s',
-                          '%sG' % new_size,
-                          volume_file,
-                          run_as_root=True)
+            fs.truncate('%dG' % new_size, volume_file)
         else:
             seek = volume['size'] * units.Ki
             count = (new_size - volume['size']) * units.Ki
@@ -519,8 +522,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         clone_path = self._get_volume_path(volume)
         payload = {'targetPath': clone_path}
         self.nef.snapshots.clone(snapshot_path, payload)
-        self.nef.filesystems.unmount(clone_path)
-        self.nef.filesystems.mount(clone_path)
+        self._remount_volume(volume)
         self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
             new_size = volume['size']
@@ -543,17 +545,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.create_snapshot(snapshot)
         try:
             self.create_volume_from_snapshot(volume, snapshot)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             LOG.debug('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
                       {'clone': volume['name'],
                        'volume': src_vref['name'],
                        'error': error})
-            raise error
+            raise
         finally:
             try:
                 self.delete_snapshot(snapshot)
-            except NefException as error:
+            except jsonrpc.NefException as error:
                 LOG.debug('Failed to delete temporary snapshot '
                           '%(volume)s@%(snapshot)s: %(error)s',
                           {'volume': src_vref['name'],
@@ -561,7 +563,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                            'error': error})
 
     def create_consistencygroup(self, context, group):
-        """Creates a consistencygroup.
+        """Creates a consistency group.
 
         :param context: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
@@ -569,6 +571,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         group_model_update = {}
         return group_model_update
+
+    def create_group(self, context, group):
+        """Creates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :returns: model_update
+        """
+        return self.create_consistencygroup(context, group)
 
     def delete_consistencygroup(self, context, group, volumes):
         """Deletes a consistency group.
@@ -584,8 +595,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_volume(volume)
         return group_model_update, volumes_model_update
 
-    def update_consistencygroup(self, context, group,
-                                add_volumes=None,
+    def delete_group(self, context, group, volumes):
+        """Deletes a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param volumes: a list of volume objects in the group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.delete_consistencygroup(context, group, volumes)
+
+    def update_consistencygroup(self, context, group, add_volumes=None,
                                 remove_volumes=None):
         """Updates a consistency group.
 
@@ -599,6 +619,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         add_volumes_update = []
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
+
+    def update_group(self, context, group, add_volumes=None,
+                     remove_volumes=None):
+        """Updates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param add_volumes: a list of volume objects to be added.
+        :param remove_volumes: a list of volume objects to be removed.
+        :returns: model_update, add_volumes_update, remove_volumes_update
+        """
+        return self.update_consistencygroup(context, group, add_volumes,
+                                            remove_volumes)
 
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Creates a consistency group snapshot.
@@ -625,6 +658,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be created.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Deletes a consistency group snapshot.
 
@@ -638,6 +681,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for snapshot in snapshots:
             self.delete_snapshot(snapshot)
         return group_model_update, snapshots_model_update
+
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be deleted.
+        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
 
     def create_consistencygroup_from_src(self, context, group, volumes,
                                          cgsnapshot=None, snapshots=None,
@@ -674,6 +727,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
             delete_payload = {'defer': True, 'recursive': True}
             self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
+
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source.
+
+        :param context: the context of the caller.
+        :param group: the Group object to be created.
+        :param volumes: a list of Volume objects in the group.
+        :param group_snapshot: the GroupSnapshot object as source.
+        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param source_group: the Group object as source.
+        :param source_vols: a list of volume objects in the source_group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.create_consistencygroup_from_src(context, group, volumes,
+                                                     group_snapshot, snapshots,
+                                                     source_group, source_vols)
 
     def _local_volume_dir(self, volume):
         """Get volume dir (mounted locally fs path) for given volume.
@@ -789,7 +860,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                          'Volume reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code='EINVAL', message=message)
         payload = {
             'parent': self.root_path,
             'fields': 'path',
@@ -815,7 +886,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if utils.check_already_managed_volume(vid):
                 message = (_('Volume %(name)s already managed')
                            % {'name': volume_name})
-                raise NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code='EBUSY', message=message)
             return existing_volume
         elif not existing_volumes:
             code = 'ENOENT'
@@ -826,7 +897,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         message = (_('Unable to manage existing volume by '
                      'reference %(reference)s: %(reason)s')
                    % {'reference': existing_ref, 'reason': reason})
-        raise NefException(code=code, message=message)
+        raise jsonrpc.NefException(code=code, message=message)
 
     def _check_already_managed_snapshot(self, snapshot_id):
         """Check cinder database for already managed snapshot.
@@ -856,7 +927,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                          'Snapshot reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code='EINVAL', message=message)
         volume_name = snapshot['volume_name']
         volume_size = snapshot['volume_size']
         volume = {'name': volume_name}
@@ -883,7 +954,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if self._check_already_managed_snapshot(sid):
                 message = (_('Snapshot %(name)s already managed')
                            % {'name': name})
-                raise NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code='EBUSY', message=message)
             return existing_snapshot
         elif not existing_snapshots:
             code = 'ENOENT'
@@ -894,7 +965,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         message = (_('Unable to manage existing snapshot by '
                      'reference %(reference)s: %(reason)s')
                    % {'reference': existing_ref, 'reason': reason})
-        raise NefException(code=code, message=message)
+        raise jsonrpc.NefException(code=code, message=message)
 
     @coordination.synchronized('{self.nef.lock}')
     def manage_existing(self, volume, existing_ref):
@@ -960,7 +1031,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'name': existing_volume['name'],
                           'file': local_path,
                           'error': error.strerror})
-            raise NefException(code=code, message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         finally:
             self._unmount_volume(existing_volume)
         return volume_size // units.Gi

@@ -16,11 +16,11 @@
 import ipaddress
 import posixpath
 import random
-import six
 import uuid
 
 from oslo_log import log as logging
 from oslo_utils import units
+import six
 
 from cinder import context
 from cinder import coordination
@@ -28,8 +28,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder import objects
 from cinder.volume import driver
-from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefException
-from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
+from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume import utils
 
@@ -70,9 +69,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - Added coordination for dataset operations.
         1.4.1 - Support for NexentaStor tenants.
         1.4.2 - Added manage/unmanage/manageable-list volume/snapshot support.
+        1.4.3 - Added consistency group capability to generic volume group.
     """
 
-    VERSION = '1.4.2'
+    VERSION = '1.4.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -87,7 +87,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                          'backend configuration not found')
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
-            raise NefException(code='ENODATA', message=message)
+            raise jsonrpc.NefException(code='ENODATA', message=message)
         self.configuration.append_config_values(
             options.NEXENTA_CONNECTION_OPTS)
         self.configuration.append_config_values(
@@ -128,17 +128,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_origin_snapshot_template)
 
     def do_setup(self, context):
-        self.nef = NefProxy(self.driver_volume_type,
-                            self.root_path,
-                            self.configuration)
+        self.nef = jsonrpc.NefProxy(self.driver_volume_type,
+                                    self.root_path,
+                                    self.configuration)
 
     def check_for_setup_error(self):
         """Check root volume group and iSCSI target service."""
         try:
             self.nef.volumegroups.get(self.root_path)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             if error.code != 'ENOENT':
-                raise error
+                raise
             payload = {'path': self.root_path,
                        'volumeBlockSize': self.dataset_blocksize}
             self.nef.volumegroups.create(payload)
@@ -146,7 +146,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if service['state'] != 'online':
             message = (_('iSCSI target service is not online: %(state)s')
                        % {'state': service['state']})
-            raise NefException(code='ESRCH', message=message)
+            raise jsonrpc.NefException(code='ESRCH', message=message)
 
     def create_volume(self, volume):
         """Create a zfs volume on appliance.
@@ -173,9 +173,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         delete_payload = {'snapshots': True}
         try:
             self.nef.volumes.delete(volume_path, delete_payload)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             if error.code != 'EEXIST':
-                raise error
+                raise
             snapshots_tree = {}
             snapshots_payload = {'parent': volume_path, 'fields': 'path'}
             snapshots = self.nef.snapshots.list(snapshots_payload)
@@ -261,17 +261,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.create_snapshot(snapshot)
         try:
             self.create_volume_from_snapshot(volume, snapshot)
-        except NefException as error:
+        except jsonrpc.NefException as error:
             LOG.debug('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
                       {'clone': volume['name'],
                        'volume': src_vref['name'],
                        'error': error})
-            raise error
+            raise
         finally:
             try:
                 self.delete_snapshot(snapshot)
-            except NefException as error:
+            except jsonrpc.NefException as error:
                 LOG.debug('Failed to delete temporary snapshot '
                           '%(volume)s@%(snapshot)s: %(error)s',
                           {'volume': src_vref['name'],
@@ -662,7 +662,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if not mapping:
             message = (_('Failed to get LUN number for %(volume)s')
                        % {'volume': volume_path})
-            raise NefException(code='ENOTBLK', message=message)
+            raise jsonrpc.NefException(code='ENOTBLK', message=message)
         lun = mapping[0]['lun']
         props_luns = [lun] * len(props_iqns)
 
@@ -775,22 +775,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             result.append('%s:%s' % (key_val['address'], key_val['port']))
         return result
 
-    @coordination.synchronized('{self.nef.lock}')
-    def _delete_snapshot(self, path, recursive=False, defer=True):
-        """Deletes a snapshot.
-
-        :param path: absolute snapshot path
-        :param recursive: boolean, True to recursively destroy snapshots
-                          of the same name on a child datasets
-        :param defer: boolean, True to mark the snapshot for deferred
-                      destroy when there are not any active references
-                      to it (for example, clones)
-        """
-        payload = {'recursive': recursive, 'defer': defer}
-        self.nef.snapshots.delete(path, payload)
-
     def create_consistencygroup(self, context, group):
-        """Creates a consistencygroup.
+        """Creates a consistency group.
 
         :param context: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
@@ -798,6 +784,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         group_model_update = {}
         return group_model_update
+
+    def create_group(self, context, group):
+        """Creates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :returns: model_update
+        """
+        return self.create_consistencygroup(context, group)
 
     def delete_consistencygroup(self, context, group, volumes):
         """Deletes a consistency group.
@@ -813,8 +808,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.delete_volume(volume)
         return group_model_update, volumes_model_update
 
-    def update_consistencygroup(self, context, group,
-                                add_volumes=None,
+    def delete_group(self, context, group, volumes):
+        """Deletes a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param volumes: a list of volume objects in the group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.delete_consistencygroup(context, group, volumes)
+
+    def update_consistencygroup(self, context, group, add_volumes=None,
                                 remove_volumes=None):
         """Updates a consistency group.
 
@@ -828,6 +832,19 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         add_volumes_update = []
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
+
+    def update_group(self, context, group,
+                     add_volumes=None, remove_volumes=None):
+        """Updates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param add_volumes: a list of volume objects to be added.
+        :param remove_volumes: a list of volume objects to be removed.
+        :returns: model_update, add_volumes_update, remove_volumes_update
+        """
+        return self.update_consistencygroup(context, group, add_volumes,
+                                            remove_volumes)
 
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Creates a consistency group snapshot.
@@ -854,6 +871,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be created.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Deletes a consistency group snapshot.
 
@@ -867,6 +894,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         for snapshot in snapshots:
             self.delete_snapshot(snapshot)
         return group_model_update, snapshots_model_update
+
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be deleted.
+        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
 
     def create_consistencygroup_from_src(self, context, group, volumes,
                                          cgsnapshot=None, snapshots=None,
@@ -904,6 +941,24 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
 
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source.
+
+        :param context: the context of the caller.
+        :param group: the Group object to be created.
+        :param volumes: a list of Volume objects in the group.
+        :param group_snapshot: the GroupSnapshot object as source.
+        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param source_group: the Group object as source.
+        :param source_vols: a list of volume objects in the source_group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.create_consistencygroup_from_src(context, group, volumes,
+                                                     group_snapshot, snapshots,
+                                                     source_group, source_vols)
+
     def _get_existing_volume(self, existing_ref):
         types = {
             'source-name': 'name',
@@ -916,7 +971,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                          'Volume reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code='EINVAL', message=message)
         payload = {
             'parent': self.root_path,
             'fields': 'name,path,volumeSize'
@@ -938,7 +993,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             if utils.check_already_managed_volume(vid):
                 message = (_('Volume %(name)s already managed')
                            % {'name': volume_name})
-                raise NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code='EBUSY', message=message)
             return existing_volume
         elif not existing_volumes:
             code = 'ENOENT'
@@ -949,7 +1004,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         message = (_('Unable to manage existing volume by '
                      'reference %(reference)s: %(reason)s')
                    % {'reference': existing_ref, 'reason': reason})
-        raise NefException(code=code, message=message)
+        raise jsonrpc.NefException(code=code, message=message)
 
     def _check_already_managed_snapshot(self, snapshot_id):
         """Check cinder database for already managed snapshot.
@@ -979,7 +1034,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                          'Snapshot reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code='EINVAL', message=message)
         volume_name = snapshot['volume_name']
         volume_size = snapshot['volume_size']
         volume = {'name': volume_name}
@@ -1006,7 +1061,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             if self._check_already_managed_snapshot(sid):
                 message = (_('Snapshot %(name)s already managed')
                            % {'name': name})
-                raise NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code='EBUSY', message=message)
             return existing_snapshot
         elif not existing_snapshots:
             code = 'ENOENT'
@@ -1017,7 +1072,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         message = (_('Unable to manage existing snapshot by '
                      'reference %(reference)s: %(reason)s')
                    % {'reference': existing_ref, 'reason': reason})
-        raise NefException(code=code, message=message)
+        raise jsonrpc.NefException(code=code, message=message)
 
     @coordination.synchronized('{self.nef.lock}')
     def manage_existing(self, volume, existing_ref):
@@ -1061,7 +1116,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                          'due to existing LUN mappings: %(mappings)s')
                        % {'path': existing_volume_path,
                           'mappings': mappings})
-            raise NefException(code='EEXIST', message=message)
+            raise jsonrpc.NefException(code='EEXIST', message=message)
         if existing_volume['name'] != volume['name']:
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
