@@ -122,6 +122,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
 
+    @staticmethod
+    def get_driver_options():
+        return (
+            options.NEXENTA_CONNECTION_OPTS +
+            options.NEXENTA_NFS_OPTS +
+            options.NEXENTA_DATASET_OPTS
+        )
+
     def do_setup(self, context):
         self.nef = jsonrpc.NefProxy(self.driver_volume_type,
                                     self.root_path,
@@ -463,7 +471,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._mount_volume(volume)
         volume_file = self.local_path(volume)
         if self.sparsed_volumes:
-            fs.truncate('%dG' % new_size, volume_file)
+            self._execute('truncate', '-s',
+                          '%dG' % new_size,
+                          volume_file,
+                          run_as_root=True)
         else:
             seek = volume['size'] * units.Ki
             count = (new_size - volume['size']) * units.Ki
