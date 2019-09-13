@@ -34,8 +34,8 @@ from cinder.privsep import fs
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers import nfs
-from cinder.volume import utils
 from cinder.volume import volume_types
+from cinder.volume import volume_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -1061,8 +1061,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'name': volume_name,
                 'path': volume_path
             }
-            vid = utils.extract_id_from_volume_name(volume_name)
-            if utils.check_already_managed_volume(vid):
+            vid = volume_utils.extract_id_from_volume_name(volume_name)
+            if volume_utils.check_already_managed_volume(vid):
                 message = (_('Volume %(name)s already managed')
                            % {'name': volume_name})
                 raise jsonrpc.NefException(code='EBUSY', message=message)
@@ -1129,7 +1129,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'volume_name': volume_name,
                 'volume_size': volume_size
             }
-            sid = utils.extract_id_from_snapshot_name(name)
+            sid = volume_utils.extract_id_from_snapshot_name(name)
             if self._check_already_managed_snapshot(sid):
                 message = (_('Snapshot %(name)s already managed')
                            % {'name': name})
@@ -1286,9 +1286,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'cinder_id': cinder_id,
                 'extra_info': extra_info
             })
-        return utils.paginate_entries_list(manageable_volumes,
-                                           marker, limit, offset,
-                                           sort_keys, sort_dirs)
+        return volume_utils.paginate_entries_list(manageable_volumes,
+                                                  marker, limit, offset,
+                                                  sort_keys, sort_dirs)
 
     def unmanage(self, volume):
         """Removes the specified volume from Cinder management.
@@ -1471,9 +1471,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'extra_info': extra_info,
                 'source_reference': source_reference
             })
-        return utils.paginate_entries_list(manageable_snapshots,
-                                           marker, limit, offset,
-                                           sort_keys, sort_dirs)
+        return volume_utils.paginate_entries_list(manageable_snapshots,
+                                                  marker, limit, offset,
+                                                  sort_keys, sort_dirs)
 
     def unmanage_snapshot(self, snapshot):
         """Removes the specified snapshot from Cinder management.
