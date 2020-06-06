@@ -423,7 +423,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if snapshot.get('volume_size', 0) > 0:
             return snapshot
         if 'size' in cache:
-            self.delete_volume(cache)
+            cache_path = self._get_volume_path(cache)
+            new_uuid = six.text_type(uuid.uuid4())
+            new_name = self.cache_image_template % new_uuid
+            new_cache = {'name': new_name}
+            new_path = self._get_volume_path(new_cache)
+            payload = {'newPath': new_path}
+            self.nef.volumes.rename(cache_path, payload)
         with image_utils.TemporaryImages.fetch(
                 image_service, ctxt, image_id) as image_file:
             image_info = image_utils.qemu_img_info(image_file)
@@ -458,11 +464,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if not self.image_cache:
             return None, False
         specs = self._get_volume_specs(volume)
-        compound = '%(checksum)s:%(format)s' % {
-            'checksum': image_meta['checksum'],
-            'format': specs['volumeBlockSize']
-        }
         image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+        image_blocksize = specs['volumeBlockSize']
+        compound = '%(id)s:%(checksum)s:%(blocksize)s' % {
+            'id': image_id,
+            'checksum': image_checksum,
+            'blocksize': image_blocksize
+        }
         namespace = uuid.UUID(image_id, version=4)
         name = utils.native_string(compound)
         cache_uuid = uuid.uuid5(namespace, name)

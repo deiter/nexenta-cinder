@@ -625,7 +625,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if snapshot.get('volume_size', 0) > 0:
             return snapshot
         if 'size' in cache:
-            self.delete_volume(cache)
+            cache_path = self._get_volume_path(cache)
+            new_uuid = six.text_type(uuid.uuid4())
+            new_name = self.cache_image_template % new_uuid
+            new_cache = {'name': new_name}
+            new_path = self._get_volume_path(new_cache)
+            payload = {'newPath': new_path}
+            self.nef.filesystems.rename(cache_path, payload)
         cache['size'] = 0
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
@@ -661,11 +667,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not self.image_cache:
             return None, False
         specs = self._get_image_specs(volume)
-        compound = '%(checksum)s:%(format)s' % {
-            'checksum': image_meta['checksum'],
-            'format': specs['format']
-        }
         image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+        image_format = specs['format']
+        compound = '%(id)s:%(checksum)s:%(format)s' % {
+            'id': image_id,
+            'checksum': image_checksum,
+            'format': image_format
+        }
         namespace = uuid.UUID(image_id, version=4)
         name = utils.native_string(compound)
         cache_uuid = uuid.uuid5(namespace, name)
