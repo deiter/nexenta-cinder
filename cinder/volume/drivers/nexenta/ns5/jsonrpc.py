@@ -96,31 +96,34 @@ class NefRequest(object):
         self.path = path
         self.payload = payload
         for attempt in range(self.attempts):
-            self.data = []
             if self.error:
                 self.delay(attempt)
                 if not self.find_host():
                     continue
-                LOG.debug('Retry request: %(info)s '
-                          '[%(attempt)s/%(attempts)s], '
-                          'reason: %(error)s',
+                LOG.debug('Retry request %(info)s after %(attempt)s '
+                          'failed attempts, maximum retry attempts '
+                          '%(attempts)s, reason: %(error)s',
                           {'info': info, 'attempt': attempt,
                            'attempts': self.attempts,
                            'error': self.error})
+            self.data = []
             try:
                 response = self.request(self.method, self.path, self.payload)
             except Exception as error:
                 if isinstance(error, NefException):
                     self.error = error
                 else:
+                    code = 'EAGAIN'
                     message = six.text_type(error)
-                    self.error = NefException(message=message)
+                    self.error = NefException(code=code, message=message)
+                LOG.error('Failed request %(info)s: %(error)s',
+                          {'info': info, 'error': self.error})
                 continue
             count = sum(self.stat.values())
-            LOG.debug('Finish request: %(info)s, '
-                      'total response time: %(time)s seconds, '
-                      'total wait time: %(wait)s seconds, '
-                      'total requests count: %(count)s, '
+            LOG.debug('Finish request %(info)s, '
+                      'response time: %(time)s seconds, '
+                      'wait time: %(wait)s seconds, '
+                      'requests count: %(count)s, '
                       'requests statistics: %(stat)s, '
                       'response content: %(content)s',
                       {'info': info, 'time': self.time,
@@ -131,7 +134,7 @@ class NefRequest(object):
             if response.content:
                 content = json.loads(response.content)
             if not response.ok:
-                LOG.error('Failed request: %(info)s, '
+                LOG.error('Failed request %(info)s, '
                           'response content: %(content)s',
                           {'info': info, 'content': content})
                 raise NefException(content)
@@ -144,7 +147,7 @@ class NefRequest(object):
             if isinstance(content, dict) and 'data' in content:
                 return self.data
             return content
-        LOG.error('Failed request: %(info)s, '
+        LOG.error('Failed request %(info)s, '
                   'reached maximum retry attempts: '
                   '%(attempts)s, reason: %(error)s',
                   {'info': info, 'attempts': self.attempts,
