@@ -761,7 +761,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         return dist
 
     def initialize_connection(self, volume, connector):
-        """Do all steps to get zfs volume exported at separate target.
+        """Allow connection to connector and return connection info.
 
         :param volume: volume reference
         :param connector: connector reference
