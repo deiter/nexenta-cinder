@@ -109,9 +109,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.9.3 - Added support for NAS secure operations.
         1.9.4 - Added support for nohide NFS option.
               - Fixed concurrency issues.
+        1.9.5 - Fixed issue with retries when mounting an NFS share.
     """
 
-    VERSION = '1.9.4'
+    VERSION = '1.9.5'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -732,23 +733,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self._remotefsclient.mount(share)
             except Exception as error:
-                if attempt == attempts:
-                    LOG.error('Failed to mount NFS share %(share)s '
-                              'after %(attempts)s attempts: %(error)s',
-                              {'share': share, 'attempts': attempts,
-                               'error': error})
-                    raise
                 LOG.debug('Mount attempt %(attempt)s failed: %(error)s, '
                           'retrying mount NFS share %(share)s',
                           {'attempt': attempt, 'error': error,
                            'share': share})
+                if attempt == attempts:
+                    LOG.error('Failed to mount NFS share %(share)s '
+                              'after %(attempt)s attempts: %(error)s',
+                              {'share': share, 'attempt': attempt,
+                               'error': error})
+                    raise
                 self.nef.delay(attempt)
             else:
-                LOG.debug('NFS share %(share)s has been mounted',
-                          {'share': share})
-                break
-        mntpoint = self._get_mount_point_for_share(share)
-        return mntpoint
+                mntpoint = self._get_mount_point_for_share(share)
+                LOG.debug('NFS share %(share)s has been mounted at '
+                          '%(mntpoint)s after %(attempt)s attempts',
+                          {'share': share, 'mntpoint': mntpoint,
+                           'attempt': attempt})
+                return mntpoint
 
     def _unmount_share(self, share, mntpoint=None):
         """Ensure that NFS share is unmounted on the host.
@@ -758,33 +760,34 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         if not mntpoint:
             mntpoint = self._get_mount_point_for_share(share)
-        if mntpoint not in self._remotefsclient._read_mounts():
-            LOG.debug('NFS share %(share)s is not mounted to '
-                      'mount point %(mntpoint)s',
+        mntpoints = self._remotefsclient._read_mounts()
+        if mntpoint not in mntpoints:
+            LOG.debug('NFS share %(share)s is not mounted at %(mntpoint)s',
                       {'share': share, 'mntpoint': mntpoint})
             return
         attempts = max(1, self.configuration.nfs_mount_attempts)
         for attempt in range(1, attempts + 1):
             try:
                 fs.umount(mntpoint)
-            except OSError as error:
+            except processutils.ProcessExecutionError as error:
+                LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
+                          'retrying unmount NFS share %(share)s mounted '
+                          'at %(mntpoint)s',
+                          {'attempt': attempt, 'error': error,
+                           'share': share, 'mntpoint': mntpoint})
                 if attempt == attempts:
                     LOG.error('Failed to unmount NFS share %(share)s '
-                              'from mount point %(mntpoint)s after '
-                              '%(attempts)s attempts: %(error)s',
+                              'mounted at %(mntpoint)s after %(attempts)s '
+                              'attempts: %(error)s',
                               {'share': share, 'mntpoint': mntpoint,
                                'attempts': attempts, 'error': error})
                     raise
-                LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
-                          'retrying unmount NFS share %(share)s from '
-                          'mount point %(mntpoint)s',
-                          {'attempt': attempt, 'error': error,
-                           'share': share, 'mntpoint': mntpoint})
                 self.nef.delay(attempt)
             else:
-                LOG.debug('NFS share %(share)s has been successfully '
-                          'unmounted from mount point %(mntpoint)s',
-                          {'share': share, 'mntpoint': mntpoint})
+                LOG.debug('NFS share %(share)s has been unmounted at '
+                          '%(mntpoint)s after %(attempt)s attempts',
+                          {'share': share, 'mntpoint': mntpoint,
+                           'attempt': attempt})
                 break
         self._delete(mntpoint)
 
@@ -1043,9 +1046,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """Driver entry point to get the export info for an existing volume."""
         pass
 
+    @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
-        pass
+        if not self.nas_nohide:
+            share = os.path.join(self.nas_share, volume['name'])
+            self._unmount_share(share)
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate a connection to a volume.
@@ -1054,12 +1060,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        if not self.nas_nohide:
-            share = os.path.join(self.nas_share, volume['name'])
-            self._unmount_share(share)
+        pass
 
+    @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def initialize_connection(self, volume, connector):
-        """Terminate a connection to a volume.
+        """Allow connection to connector and return connection info.
 
         :param volume: a volume object
         :param connector: a connector object
@@ -1172,11 +1177,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self._execute('rm', '-d', mntpoint,
                           run_as_root=self._execute_as_root)
+        except processutils.ProcessExecutionError as error:
+            LOG.error('Failed to remove mountpoint %(mntpoint)s: %(error)s',
+                      {'mntpoint': mntpoint, 'error': error})
+        else:
             LOG.debug('The mount point %(mntpoint)s has been removed',
                       {'mntpoint': mntpoint})
-        except OSError as error:
-            LOG.error('Failed to remove mount point %(mntpoint)s: %(error)s',
-                      {'mntpoint': mntpoint, 'error': error.strerror})
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume.
