@@ -83,9 +83,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - SSL errors, proxy and NMS errors.
         1.4.2 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
+        1.4.3 - Fixed concurrency issues.
     """
 
-    VERSION = '1.4.2'
+    VERSION = '1.4.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -987,7 +988,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         return group_props
 
     def initialize_connection(self, volume, connector):
-        """Do all steps to get zfs volume exported at separate target.
+        """Allow connection to connector and return connection info.
 
         :param volume: volume reference
         :param connector: connector reference
