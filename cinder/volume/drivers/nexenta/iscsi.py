@@ -26,6 +26,7 @@ from oslo_utils import units
 import six
 
 from cinder import context
+from cinder import coordination
 from cinder.i18n import _
 from cinder import interface
 from cinder import objects
@@ -85,9 +86,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - SSL errors, proxy and NMS errors.
         1.4.2 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
+        1.4.3 - Fixed concurrency issues.
     """
 
-    VERSION = '1.4.2'
+    VERSION = '1.4.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -988,8 +990,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                    'members': group_props})
         return group_props
 
+    @coordination.synchronized('{self.nms.lock}-{volume[id]}')
     def initialize_connection(self, volume, connector):
-        """Do all steps to get zfs volume exported at separate target.
+        """Allow connection to connector and return connection info.
 
         :param volume: volume reference
         :param connector: connector reference
@@ -1167,6 +1170,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                   {'member': member, 'group': group})
         self.nms.stmf.add_hostgroup_member(group, member)
 
+    @coordination.synchronized('{self.nms.lock}-{volume[id]}')
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate a connection to a volume.
 

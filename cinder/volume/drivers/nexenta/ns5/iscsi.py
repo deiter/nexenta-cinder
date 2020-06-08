@@ -666,6 +666,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """Driver entry point to remove an export for a volume."""
         pass
 
+    @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate a connection to a volume.
 
@@ -939,8 +940,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             dist[name] = {'iqn': member, 'portals': portals}
         return dist
 
+    @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def initialize_connection(self, volume, connector):
-        """Do all steps to get zfs volume exported at separate target.
+        """Allow connection to connector and return connection info.
 
         :param volume: volume reference
         :param connector: connector reference
