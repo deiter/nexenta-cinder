@@ -28,6 +28,7 @@ from oslo_utils import units
 import six
 
 from cinder import context
+from cinder import coordination
 from cinder.i18n import _
 from cinder import interface
 from cinder import objects
@@ -80,9 +81,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - SSL errors, proxy and NMS errors.
         1.4.2 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
+        1.4.3 - Fixed concurrency issues.
+              - Fixed issue with retries when mounting an NFS share.
     """
 
-    VERSION = '1.4.2'
+    VERSION = '1.4.3'
     CI_WIKI_NAME = 'Nexenta_CI'
 
     vendor_name = 'Nexenta'
@@ -273,6 +276,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         finally:
             self._unmount_volume(volume)
 
+    @coordination.synchronized('{self.nms.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         LOG.debug('Copy image %(image)s to volume %(volume)s',
                   {'image': image_id, 'volume': volume['name']})
@@ -281,6 +285,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             ctxt, volume, image_service, image_id)
         self._unmount_volume(volume)
 
+    @coordination.synchronized('{self.nms.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
         LOG.debug('Copy volume %(volume)s to image %(image)s',
                   {'volume': volume['name'], 'image': image_meta['id']})
@@ -398,40 +403,48 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param share: share path
         """
-        attempts = max(1, self.configuration.nfs_mount_attempts)
-        path = self._get_mount_point_for_share(share)
-        if path not in self._remotefsclient._read_mounts():
-            LOG.debug('NFS share %(share)s is not mounted at %(path)s',
-                      {'share': share, 'path': path})
+        mntpoint = self._get_mount_point_for_share(share)
+        mntpoints = self._remotefsclient._read_mounts()
+        if mntpoint not in mntpoints:
+            LOG.debug('NFS share %(share)s is not mounted at %(mntpoint)s',
+                      {'share': share, 'mntpoint': mntpoint})
             return
-        for attempt in range(attempts):
+        attempts = max(1, self.configuration.nfs_mount_attempts)
+        for attempt in range(1, attempts + 1):
             try:
-                fs.umount(path)
-                LOG.debug('NFS share %(share)s has been unmounted at %(path)s',
-                          {'share': share, 'path': path})
-                break
-            except Exception as error:
-                if attempt == (attempts - 1):
-                    LOG.error('Failed to unmount NFS share %(share)s '
-                              'after %(attempts)s attempts',
-                              {'share': share, 'attempts': attempts})
-                    raise
+                fs.umount(mntpoint)
+            except processutils.ProcessExecutionError as error:
                 LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
-                          'retrying unmount %(share)s from %(path)s',
+                          'retrying unmount NFS share %(share)s mounted '
+                          'at %(mntpoint)s',
                           {'attempt': attempt, 'error': error,
-                           'share': share, 'path': path})
+                           'share': share, 'mntpoint': mntpoint})
+                if attempt == attempts:
+                    LOG.error('Failed to unmount NFS share %(share)s '
+                              'mounted at %(mntpoint)s after %(attempt)s '
+                              'attempts: %(error)s',
+                              {'share': share, 'mntpoint': mntpoint,
+                               'attempt': attempt, 'error': error})
+                    raise
                 greenthread.sleep(DEFAULT_RETRY_DELAY)
-        self._delete(path)
+            else:
+                LOG.debug('NFS share %(share)s has been unmounted at '
+                          '%(mntpoint)s after %(attempt)s attempts',
+                          {'share': share, 'mntpoint': mntpoint,
+                           'attempt': attempt})
+                break
+        self._delete(mntpoint)
 
-    def _delete(self, path):
+    def _delete(self, mntpoint):
         """Override parent method for safe remove mountpoint."""
         try:
-            os.rmdir(path)
-            LOG.debug('The mountpoint %(path)s has been successfully removed',
-                      {'path': path})
-        except OSError as error:
-            LOG.debug('Failed to remove mountpoint %(path)s: %(error)s',
-                      {'path': path, 'error': error.strerror})
+            self._execute('rm', '-d', mntpoint, run_as_root=True)
+        except processutils.ProcessExecutionError as error:
+            LOG.debug('Failed to remove mountpoint %(mntpoint)s: %(error)s',
+                      {'mntpoint': mntpoint, 'error': error})
+        else:
+            LOG.debug('The mountpoint %(mntpoint)s has been removed',
+                      {'mntpoint': mntpoint})
 
     def _mount_volume(self, volume):
         """Ensure that volume is activated and mounted on the host."""
@@ -455,9 +468,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """Driver entry point to get the export info for an existing volume."""
         pass
 
+    @coordination.synchronized('{self.nms.lock}-{volume[id]}')
     def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
-        pass
+        self._unmount_volume(volume)
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate a connection to a volume.
@@ -466,10 +480,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        LOG.debug('Terminate volume connection for %(volume)s',
-                  {'volume': volume['name']})
-        self._unmount_volume(volume)
+        pass
 
+    @coordination.synchronized('{self.nms.lock}-{volume[id]}')
     def initialize_connection(self, volume, connector):
         """Allow connection to connector and return connection info.
 
